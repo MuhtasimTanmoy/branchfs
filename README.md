@@ -15,47 +15,23 @@ BranchFS is a FUSE-based filesystem that provides lightweight, atomic branching 
 
 ## Architecture
 
-BranchFS operates as a single daemon process managing multiple mount sessions. The daemon starts automatically on the first mount and exits when the last mount is removed. Each branch provides an isolated view of the filesystem while sharing unchanged content with its parent.
+BranchFS is a FUSE-based filesystem that requires no root privileges. It implements file-level copy-on-write: when a file is modified on a branch, the entire file is lazily copied to the branch's delta storage, while unmodified files are resolved by walking up the branch chain to the base directory. Deletions are tracked via tombstone markers. On commit, all changes from the branch chain are applied atomically to the base directory; on abort, the branch's delta storage is simply discarded.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Namespace 1                 Namespace 2                Namespace 3 │
-│  Agent 1                     Agent 2                    Agent 3     │
-│                                                                     │
-│  /mnt/workspace              /mnt/workspace             /mnt/...    │
-│  (branch: spec1)             (branch: spec2)            (spec3)     │
-│                                                                     │
-└────────┬─────────────────────────────┬─────────────────────┬────────┘
-         │                             │                     │
-         ▼                             ▼                     ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│                    BranchFS Daemon (FUSE)                           │
-│                                                                     │
-│         Manages branch hierarchy, copy-on-write storage,            │
-│         and atomic commit/abort operations                          │
-│                                                                     │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│      Base Directory                    Branch Storage               │
-│      (read-only reference,             (copy-on-write deltas)       │
-│       commit target)                                                │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+### Why not overlayfs?
 
-### Branch Hierarchy
+Overlayfs only supports a single upper layer (no nested branches), and lacks commit-to-root semantics—changes remain in the upper layer rather than being applied back to the base. It also has no cross-mount cache invalidation needed for speculative execution workflows.
 
-Branches form a tree rooted at the main branch. Each branch inherits content from its parent and stores only modified files.
+### Why not btrfs subvolumes?
 
-```
-base (~/project)
-│
-└── main
-    ├── spec1
-    │   └── spec1a
-    └── spec2
-```
+Btrfs subvolumes are tied to the btrfs filesystem, making them non-portable across ext4, xfs, or network filesystems. Snapshots create independent copies rather than branches that commit back to a parent, and there's no mechanism for automatic cache invalidation when one snapshot's changes should affect others.
+
+### Why not dm-snapshot?
+
+Device mapper snapshots operate at the block level, requiring a block device, so they can't work on NFS, existing FUSE mounts, or arbitrary filesystems. Merging a snapshot back to its origin is complex and destructive, and like overlayfs, dm-snapshot only supports single-level snapshots without nested branches.
+
+### What about FUSE overhead?
+
+FUSE adds userspace-kernel context switches per operation, which is slower than native kernel filesystems. However, for speculative execution with AI agents, the bottleneck is typically network latency (LLM API calls at 100ms-10s) and GPU compute, not file I/O. FUSE overhead is negligible in comparison.
 
 ## Prerequisites
 
@@ -177,86 +153,3 @@ Unmounting discards the current branch and removes the mount:
 2. Parent branch chain remains intact in storage
 3. The mount is removed from daemon management
 4. The daemon automatically exits when the last mount is removed
-
-## CLI Reference
-
-### mount
-
-Mount the filesystem on main branch. The daemon starts automatically on the first mount and exits when the last mount is removed.
-
-```bash
-branchfs mount --base <BASE_DIR> [--storage <STORAGE_DIR>] <MOUNT_POINT>
-```
-
-| Option | Description |
-|--------|-------------|
-| `--base` | Source directory to branch from (required on first mount) |
-| `--storage` | Directory for branch storage (default: `/var/lib/branchfs`) |
-| `<MOUNT_POINT>` | Where to mount the filesystem |
-
-### create
-
-Create a new branch from an existing parent, optionally switching an existing mount to it.
-
-```bash
-branchfs create <NAME> [--parent <PARENT>] [--mount <MOUNT_POINT>] [--storage <STORAGE_DIR>]
-```
-
-| Option | Description |
-|--------|-------------|
-| `<NAME>` | Name for the new branch |
-| `--parent`, `-p` | Parent branch name (default: `main`) |
-| `--mount`, `-m` | Mount point to switch to the new branch |
-| `--storage` | Directory for branch storage (default: `/var/lib/branchfs`) |
-
-### commit
-
-Commit all changes from the current branch chain to the base filesystem. The mount switches to main and stays mounted.
-
-```bash
-branchfs commit <MOUNT_POINT> [--storage <STORAGE_DIR>]
-```
-
-| Option | Description |
-|--------|-------------|
-| `<MOUNT_POINT>` | Mount point of the branch to commit |
-| `--storage` | Directory for branch storage (default: `/var/lib/branchfs`) |
-
-### abort
-
-Abort the entire branch chain, discarding all uncommitted changes. The mount switches to main and stays mounted.
-
-```bash
-branchfs abort <MOUNT_POINT> [--storage <STORAGE_DIR>]
-```
-
-| Option | Description |
-|--------|-------------|
-| `<MOUNT_POINT>` | Mount point of the branch to abort |
-| `--storage` | Directory for branch storage (default: `/var/lib/branchfs`) |
-
-### list
-
-List all branches and their parent relationships.
-
-```bash
-branchfs list [--storage <STORAGE_DIR>]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--storage` | Directory for branch storage (default: `/var/lib/branchfs`) |
-
-### unmount
-
-Unmount and discard only the current branch (single-level). Parent branches remain in storage. The daemon automatically exits when the last mount is removed.
-
-```bash
-branchfs unmount <MOUNT_POINT> [--storage <STORAGE_DIR>]
-```
-
-| Option | Description |
-|--------|-------------|
-| `<MOUNT_POINT>` | Mount point to unmount |
-| `--storage` | Directory for branch storage (default: `/var/lib/branchfs`) |
-
