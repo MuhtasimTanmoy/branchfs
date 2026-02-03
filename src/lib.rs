@@ -2,6 +2,9 @@ pub mod branch;
 pub mod daemon;
 pub mod error;
 pub mod fs;
+mod fs_ctl;
+mod fs_helpers;
+pub(crate) mod fs_path;
 pub mod inode;
 pub mod storage;
 
