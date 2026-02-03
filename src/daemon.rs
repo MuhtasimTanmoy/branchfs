@@ -429,10 +429,7 @@ pub fn start_daemon_background(base_path: &Path, storage_path: &Path) -> std::io
             }
             std::process::exit(0);
         }
-        Err(e) => Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Fork failed: {}", e),
-        )),
+        Err(e) => Err(std::io::Error::other(format!("Fork failed: {}", e))),
     }
 }
 
