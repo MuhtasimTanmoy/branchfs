@@ -31,7 +31,7 @@ enum Commands {
         mountpoint: PathBuf,
     },
 
-    /// Create a new branch
+    /// Create a new branch and switch to it
     Create {
         /// Branch name
         name: String,
@@ -46,10 +46,6 @@ enum Commands {
         /// Storage directory
         #[arg(long, default_value = "/var/lib/branchfs")]
         storage: PathBuf,
-
-        /// Switch to the new branch after creation
-        #[arg(long, short = 's')]
-        switch: bool,
     },
 
     /// Commit branch to base
@@ -149,7 +145,6 @@ fn main() -> Result<()> {
             mountpoint,
             parent,
             storage,
-            switch,
         } => {
             let storage = storage.canonicalize()?;
             let mountpoint = mountpoint.canonicalize()?;
@@ -164,38 +159,33 @@ fn main() -> Result<()> {
             )?;
 
             if response.ok {
-                println!("Created branch '{}' with parent '{}'", name, parent);
+                // Switch to the new branch
+                let ctl_path = mountpoint.join(".branchfs_ctl");
 
-                // Switch the mount to the new branch if --switch is provided
-                if switch {
-                    let ctl_path = mountpoint.join(".branchfs_ctl");
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&ctl_path)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to open control file (is {} mounted?): {}",
+                            mountpoint.display(),
+                            e
+                        )
+                    })?;
 
-                    // Write switch command to control file
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&ctl_path)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to open control file (is {} mounted?): {}",
-                                mountpoint.display(),
-                                e
-                            )
-                        })?;
+                file.write_all(format!("switch:{}", name).as_bytes())
+                    .map_err(|e| anyhow::anyhow!("Failed to switch to branch: {}", e))?;
 
-                    file.write_all(format!("switch:{}", name).as_bytes())
-                        .map_err(|e| anyhow::anyhow!("Failed to switch to branch: {}", e))?;
+                // Notify daemon of the switch
+                let _ = send_request(
+                    &storage,
+                    &Request::NotifySwitch {
+                        mountpoint: mountpoint.to_string_lossy().to_string(),
+                        branch: name.clone(),
+                    },
+                );
 
-                    // Notify daemon of the switch
-                    let _ = send_request(
-                        &storage,
-                        &Request::NotifySwitch {
-                            mountpoint: mountpoint.to_string_lossy().to_string(),
-                            branch: name.clone(),
-                        },
-                    );
-
-                    println!("Switched to branch '{}' at {:?}", name, mountpoint);
-                }
+                println!("Created and switched to branch '{}' (parent: '{}')", name, parent);
             } else {
                 eprintln!("Error: {}", response.error.unwrap_or_default());
                 process::exit(1);

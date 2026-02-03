@@ -99,21 +99,15 @@ do_unmount() {
     sleep 0.3
 }
 
-# Create a branch
-# Usage: do_create <name> [parent] [switch_flag]
+# Create a branch (always switches to it)
+# Usage: do_create <name> [parent]
 # - name: branch name
 # - parent: parent branch (default: main)
-# - switch_flag: pass "-s" to switch to the new branch after creation
 do_create() {
     local name="$1"
     local parent="${2:-main}"
-    local switch_flag="${3:-}"
 
-    if [[ -n "$switch_flag" ]]; then
-        "$BRANCHFS" create "$name" "$TEST_MNT" -p "$parent" -s --storage "$TEST_STORAGE"
-    else
-        "$BRANCHFS" create "$name" "$TEST_MNT" -p "$parent" --storage "$TEST_STORAGE"
-    fi
+    "$BRANCHFS" create "$name" "$TEST_MNT" -p "$parent" --storage "$TEST_STORAGE"
     sleep 0.3
 }
 

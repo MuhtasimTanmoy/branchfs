@@ -20,7 +20,7 @@ test_unmount_main() {
 test_unmount_discards_single_branch() {
     setup
     do_mount
-    do_create "unmount_test" "main" "-s"
+    do_create "unmount_test" "main"
 
     echo "branch content" > "$TEST_MNT/branch_file.txt"
 
@@ -39,10 +39,10 @@ test_unmount_cleans_all_branches() {
     do_mount
 
     # Create nested branches
-    do_create "parent_branch" "main" "-s"
+    do_create "parent_branch" "main"
     echo "parent content" > "$TEST_MNT/parent_file.txt"
 
-    do_create "child_branch" "parent_branch" "-s"
+    do_create "child_branch" "parent_branch"
     echo "child content" > "$TEST_MNT/child_file.txt"
 
     # Unmount (per-mount isolation: cleans up ALL branches for this mount)
@@ -69,7 +69,7 @@ test_unmount_cleans_all_branches() {
 test_unmount_cleanup() {
     setup
     do_mount
-    do_create "cleanup_test" "main" "-s"
+    do_create "cleanup_test" "main"
 
     # Create some files
     echo "test" > "$TEST_MNT/test.txt"
