@@ -222,6 +222,28 @@ impl Daemon {
         Ok(())
     }
 
+    fn cleanup_all_mounts(&self) {
+        let mut mounts = self.mounts.lock();
+        let mountpoints: Vec<PathBuf> = mounts.keys().cloned().collect();
+        for mountpoint in &mountpoints {
+            if let Some(info) = mounts.remove(mountpoint) {
+                info.manager
+                    .unregister_notifier(&info.current_branch, mountpoint);
+                // BackgroundSession dropped here → FUSE unmount
+                if info.mount_storage.exists() {
+                    if let Err(e) = fs::remove_dir_all(&info.mount_storage) {
+                        log::warn!(
+                            "Failed to clean up mount storage {:?}: {}",
+                            info.mount_storage,
+                            e
+                        );
+                    }
+                }
+                log::info!("Cleaned up mount at {:?}", mountpoint);
+            }
+        }
+    }
+
     pub fn mount_count(&self) -> usize {
         self.mounts.lock().len()
     }
@@ -307,13 +329,11 @@ impl Daemon {
             };
 
             let response = self.handle_request(request);
-
-            if let Request::Shutdown = serde_json::from_str(&line).unwrap_or(Request::Shutdown) {
-                writeln!(stream, "{}", serde_json::to_string(&response)?)?;
-                std::process::exit(0);
-            }
-
             writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+
+            if self.shutdown.load(Ordering::SeqCst) {
+                break;
+            }
         }
 
         Ok(())
@@ -392,7 +412,9 @@ impl Daemon {
                 }
             }
             Request::Shutdown => {
-                log::info!("Shutdown requested");
+                log::info!("Shutdown requested, cleaning up all mounts");
+                self.cleanup_all_mounts();
+                self.shutdown.store(true, Ordering::SeqCst);
                 Response::success()
             }
         }
