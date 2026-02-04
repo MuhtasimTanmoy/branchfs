@@ -117,6 +117,122 @@ test_append_to_file() {
     do_unmount
 }
 
+test_create_file_permissions() {
+    setup
+    do_mount
+    do_create "perm_create_test" "main"
+
+    # Create a file — default mode should not be 000
+    touch "$TEST_MNT/perm_file.txt"
+    local mode
+    mode=$(stat -c '%a' "$TEST_MNT/perm_file.txt")
+    assert "[[ '$mode' != '000' ]]" "Created file has non-zero permissions ($mode)"
+
+    # Verify owner is current user
+    local file_uid
+    file_uid=$(stat -c '%u' "$TEST_MNT/perm_file.txt")
+    assert_eq "$file_uid" "$(id -u)" "Created file owned by current user"
+
+    do_unmount
+}
+
+test_mkdir_permissions() {
+    setup
+    do_mount
+    do_create "perm_mkdir_test" "main"
+
+    mkdir "$TEST_MNT/perm_dir"
+    local mode
+    mode=$(stat -c '%a' "$TEST_MNT/perm_dir")
+    # mkdir should produce a directory with reasonable permissions (not 000)
+    assert "[[ '$mode' != '000' ]]" "Created directory has non-zero permissions ($mode)"
+
+    local dir_uid
+    dir_uid=$(stat -c '%u' "$TEST_MNT/perm_dir")
+    assert_eq "$dir_uid" "$(id -u)" "Created directory owned by current user"
+
+    do_unmount
+}
+
+test_chmod_file() {
+    setup
+    do_mount
+    do_create "chmod_test" "main"
+
+    echo "test" > "$TEST_MNT/chmod_file.txt"
+    chmod 0755 "$TEST_MNT/chmod_file.txt"
+    local mode
+    mode=$(stat -c '%a' "$TEST_MNT/chmod_file.txt")
+    assert_eq "$mode" "755" "chmod 0755 applied correctly"
+
+    chmod 0600 "$TEST_MNT/chmod_file.txt"
+    mode=$(stat -c '%a' "$TEST_MNT/chmod_file.txt")
+    assert_eq "$mode" "600" "chmod 0600 applied correctly"
+
+    # Base file should be unaffected
+    local base_mode
+    base_mode=$(stat -c '%a' "$TEST_BASE/file1.txt")
+    assert "[[ '$base_mode' != '755' ]]" "Base file permissions unchanged"
+
+    do_unmount
+}
+
+test_chmod_directory() {
+    setup
+    do_mount
+    do_create "chmod_dir_test" "main"
+
+    mkdir "$TEST_MNT/chmod_dir"
+    chmod 0700 "$TEST_MNT/chmod_dir"
+    local mode
+    mode=$(stat -c '%a' "$TEST_MNT/chmod_dir")
+    assert_eq "$mode" "700" "chmod 0700 on directory applied correctly"
+
+    do_unmount
+}
+
+test_chmod_existing_file_cow() {
+    setup
+    do_mount
+    do_create "chmod_cow_test" "main"
+
+    # chmod on a base file should COW and apply
+    chmod 0755 "$TEST_MNT/file1.txt"
+    local mode
+    mode=$(stat -c '%a' "$TEST_MNT/file1.txt")
+    assert_eq "$mode" "755" "chmod on base file applied via COW"
+
+    # Base file should be unchanged
+    local base_mode
+    base_mode=$(stat -c '%a' "$TEST_BASE/file1.txt")
+    assert "[[ '$base_mode' != '755' ]]" "Base file permissions unchanged after COW chmod"
+
+    do_unmount
+}
+
+test_synthetic_entry_ownership() {
+    setup
+    do_mount
+
+    # Root directory should be owned by current user
+    local root_uid
+    root_uid=$(stat -c '%u' "$TEST_MNT")
+    assert_eq "$root_uid" "$(id -u)" "Mount root owned by current user"
+
+    # .branchfs_ctl should be owned by current user
+    local ctl_uid
+    ctl_uid=$(stat -c '%u' "$TEST_MNT/.branchfs_ctl")
+    assert_eq "$ctl_uid" "$(id -u)" "Control file owned by current user"
+
+    # @branch virtual directory
+    do_create "owner_test" "main"
+    local branch_uid
+    branch_uid=$(stat -c '%u' "$TEST_MNT/@owner_test")
+    assert_eq "$branch_uid" "$(id -u)" "@branch dir owned by current user"
+
+    do_unmount
+}
+
 # Run tests
 run_test "Read Base Files" test_read_base_files
 run_test "Write New File in Branch" test_write_new_file_in_branch
@@ -125,5 +241,11 @@ run_test "Delete File in Branch" test_delete_file_in_branch
 run_test "Create Directory in Branch" test_create_directory_in_branch
 run_test "Delete Directory in Branch" test_delete_directory_in_branch
 run_test "Append to File" test_append_to_file
+run_test "Create File Permissions" test_create_file_permissions
+run_test "Mkdir Permissions" test_mkdir_permissions
+run_test "Chmod File" test_chmod_file
+run_test "Chmod Directory" test_chmod_directory
+run_test "Chmod Existing File (COW)" test_chmod_existing_file_cow
+run_test "Synthetic Entry Ownership" test_synthetic_entry_ownership
 
 print_summary
