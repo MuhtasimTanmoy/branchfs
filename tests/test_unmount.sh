@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test unmount functionality (per-mount isolation: full cleanup on unmount)
+# Test unmount functionality
 
 source "$(dirname "$0")/test_helper.sh"
 
@@ -12,9 +12,6 @@ test_unmount_main() {
 
     # Should be unmounted
     assert "! mountpoint -q '$TEST_MNT'" "Mount point unmounted"
-
-    # With per-mount isolation, mount storage is cleaned up on unmount
-    # Remounting creates a fresh mount with only main branch
 }
 
 test_unmount_discards_single_branch() {
@@ -45,16 +42,15 @@ test_unmount_cleans_all_branches() {
     do_create "child_branch" "parent_branch"
     echo "child content" > "$TEST_MNT/child_file.txt"
 
-    # Unmount (per-mount isolation: cleans up ALL branches for this mount)
+    # Unmount — daemon exits, branches cleaned up on next startup
     do_unmount
 
     # Should be unmounted
     assert "! mountpoint -q '$TEST_MNT'" "Mount point unmounted"
 
-    # Remount - starts fresh with only main branch
+    # Remount - daemon restarts fresh, only main branch
     do_mount
 
-    # Per-mount isolation: all branches are cleaned up, only main exists
     assert_branch_exists "main" "Main branch exists after remount"
     assert_branch_not_exists "parent_branch" "Parent branch cleaned up on unmount"
     assert_branch_not_exists "child_branch" "Child branch cleaned up on unmount"
@@ -74,29 +70,32 @@ test_unmount_cleanup() {
     # Create some files
     echo "test" > "$TEST_MNT/test.txt"
 
-    # Check that mount storage exists before unmount
-    local mounts_dir="$TEST_STORAGE/mounts"
-    assert "[[ -d '$mounts_dir' ]]" "Mounts directory exists before unmount"
+    # Check that branches directory exists before unmount
+    local branches_dir="$TEST_STORAGE/branches"
+    assert "[[ -d '$branches_dir' ]]" "Branches directory exists before unmount"
 
-    # Get mount count before unmount
-    local mount_count_before
-    mount_count_before=$(ls "$mounts_dir" 2>/dev/null | wc -l)
-    assert "[[ $mount_count_before -gt 0 ]]" "Mount storage exists before unmount"
+    # Should have branches (main + cleanup_test)
+    local branch_count_before
+    branch_count_before=$(ls "$branches_dir" 2>/dev/null | wc -l)
+    assert "[[ $branch_count_before -gt 0 ]]" "Branches exist before unmount"
 
-    # Unmount
+    # Unmount — daemon exits when last mount removed
     do_unmount
 
-    # Mount-specific storage should be cleaned up
-    # (mounts directory may still exist but should be empty)
-    local mount_count_after
-    mount_count_after=$(ls "$mounts_dir" 2>/dev/null | wc -l)
-    assert "[[ $mount_count_after -eq 0 ]]" "Mount storage cleaned up on unmount"
+    # After daemon restart, branches dir is cleaned up
+    # (daemon cleans branches/ on startup for fresh state)
+    do_mount
+    local branch_count_after
+    branch_count_after=$(ls "$branches_dir" 2>/dev/null | wc -l)
+    # Only "main" branch should exist after fresh start
+    assert "[[ $branch_count_after -eq 1 ]]" "Only main branch after remount"
+    do_unmount
 }
 
 # Run tests
 run_test "Unmount Main" test_unmount_main
 run_test "Unmount Discards Single Branch" test_unmount_discards_single_branch
-run_test "Unmount Cleans All Branches (Per-Mount Isolation)" test_unmount_cleans_all_branches
+run_test "Unmount Cleans All Branches" test_unmount_cleans_all_branches
 run_test "Unmount Cleanup" test_unmount_cleanup
 
 print_summary

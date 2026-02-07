@@ -123,7 +123,7 @@ do_abort() {
 
 # List branches
 do_list() {
-    "$BRANCHFS" list "$TEST_MNT" --storage "$TEST_STORAGE"
+    "$BRANCHFS" list --storage "$TEST_STORAGE"
 }
 
 # Assert that a condition is true

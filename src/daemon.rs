@@ -1,7 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -21,25 +19,11 @@ use crate::fs::BranchFs;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    Mount {
-        branch: String,
-        mountpoint: String,
-    },
-    Unmount {
-        mountpoint: String,
-    },
-    Create {
-        name: String,
-        parent: String,
-        mountpoint: String,
-    },
-    NotifySwitch {
-        mountpoint: String,
-        branch: String,
-    },
-    List {
-        mountpoint: String,
-    },
+    Mount { branch: String, mountpoint: String },
+    Unmount { mountpoint: String },
+    Create { name: String, parent: String },
+    NotifySwitch { mountpoint: String, branch: String },
+    List,
     Shutdown,
 }
 
@@ -78,27 +62,17 @@ impl Response {
     }
 }
 
-/// Per-mount state including the FUSE session, current branch, and isolated branch manager
+/// Per-mount state including the FUSE session and current branch
 pub struct MountInfo {
     session: BackgroundSession,
     current_branch: String,
-    manager: Arc<BranchManager>,
-    mount_storage: PathBuf,
 }
 
 pub struct Daemon {
-    base_path: PathBuf,
-    storage_path: PathBuf,
+    manager: Arc<BranchManager>,
     mounts: Mutex<HashMap<PathBuf, MountInfo>>,
     socket_path: PathBuf,
     shutdown: AtomicBool,
-}
-
-/// Generate a hash-based directory name for a mountpoint
-fn mount_hash(mountpoint: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
-    mountpoint.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
 }
 
 impl Daemon {
@@ -109,7 +83,15 @@ impl Daemon {
     ) -> Result<Self> {
         let socket_path = storage_path.join("daemon.sock");
 
-        // Clean up orphaned mount directories on startup
+        // Clean up branches from previous daemon run for fresh state
+        let branches_dir = storage_path.join("branches");
+        if branches_dir.exists() {
+            if let Err(e) = fs::remove_dir_all(&branches_dir) {
+                log::warn!("Failed to clean up branches directory: {}", e);
+            }
+        }
+
+        // Also clean up legacy mounts directory if present
         let mounts_dir = storage_path.join("mounts");
         if mounts_dir.exists() {
             if let Err(e) = fs::remove_dir_all(&mounts_dir) {
@@ -122,9 +104,15 @@ impl Daemon {
         fs::create_dir_all(&storage_path)?;
         fs::write(&base_file, base_path.to_string_lossy().as_bytes())?;
 
+        // Create the single shared BranchManager
+        let manager = Arc::new(BranchManager::new(
+            storage_path.clone(),
+            base_path.clone(),
+            base_path.clone(),
+        )?);
+
         Ok(Self {
-            base_path,
-            storage_path,
+            manager,
             mounts: Mutex::new(HashMap::new()),
             socket_path,
             shutdown: AtomicBool::new(false),
@@ -136,31 +124,16 @@ impl Daemon {
     }
 
     pub fn spawn_mount(&self, branch_name: &str, mountpoint: &Path) -> Result<()> {
-        // Create mount-specific storage directory
-        let mount_storage = self
-            .storage_path
-            .join("mounts")
-            .join(mount_hash(mountpoint));
-        fs::create_dir_all(&mount_storage)?;
-
-        // Create a new BranchManager for this mount
-        let manager = Arc::new(BranchManager::new(
-            mount_storage.clone(),
-            self.base_path.clone(),
-            mountpoint.to_path_buf(),
-        )?);
-
-        let fs = BranchFs::new(manager.clone(), branch_name.to_string());
+        let fs = BranchFs::new(self.manager.clone(), branch_name.to_string());
         let options = vec![
             MountOption::FSName("branchfs".to_string()),
             MountOption::DefaultPermissions,
         ];
 
         log::info!(
-            "Spawning mount for branch '{}' at {:?} with storage {:?}",
+            "Spawning mount for branch '{}' at {:?}",
             branch_name,
             mountpoint,
-            mount_storage
         );
 
         let session =
@@ -168,13 +141,12 @@ impl Daemon {
 
         // Get the notifier for cache invalidation and register it with the manager
         let notifier = Arc::new(session.notifier());
-        manager.register_notifier(branch_name, mountpoint.to_path_buf(), notifier);
+        self.manager
+            .register_notifier(branch_name, mountpoint.to_path_buf(), notifier);
 
         let mount_info = MountInfo {
             session,
             current_branch: branch_name.to_string(),
-            manager,
-            mount_storage,
         };
 
         self.mounts
@@ -199,22 +171,9 @@ impl Daemon {
             }
         };
 
-        // Clean up mount storage directory (full cleanup on unmount)
         if let Some(info) = mount_info {
-            info.manager
+            self.manager
                 .unregister_notifier(&info.current_branch, mountpoint);
-            // Delete the entire mount storage directory
-            if info.mount_storage.exists() {
-                if let Err(e) = fs::remove_dir_all(&info.mount_storage) {
-                    log::warn!(
-                        "Failed to clean up mount storage {:?}: {}",
-                        info.mount_storage,
-                        e
-                    );
-                } else {
-                    log::info!("Cleaned up mount storage {:?}", info.mount_storage);
-                }
-            }
         }
 
         if should_shutdown {
@@ -230,18 +189,9 @@ impl Daemon {
         let mountpoints: Vec<PathBuf> = mounts.keys().cloned().collect();
         for mountpoint in &mountpoints {
             if let Some(info) = mounts.remove(mountpoint) {
-                info.manager
+                self.manager
                     .unregister_notifier(&info.current_branch, mountpoint);
                 // BackgroundSession dropped here → FUSE unmount
-                if info.mount_storage.exists() {
-                    if let Err(e) = fs::remove_dir_all(&info.mount_storage) {
-                        log::warn!(
-                            "Failed to clean up mount storage {:?}: {}",
-                            info.mount_storage,
-                            e
-                        );
-                    }
-                }
                 log::info!("Cleaned up mount at {:?}", mountpoint);
             }
         }
@@ -251,27 +201,16 @@ impl Daemon {
         self.mounts.lock().len()
     }
 
-    pub fn create_branch(&self, name: &str, parent: &str, mountpoint: &Path) -> Result<()> {
-        let mounts = self.mounts.lock();
-        let mount_info = mounts
-            .get(mountpoint)
-            .ok_or_else(|| crate::error::BranchError::MountNotFound(format!("{:?}", mountpoint)))?;
-        mount_info.manager.create_branch(name, parent)
+    pub fn create_branch(&self, name: &str, parent: &str) -> Result<()> {
+        self.manager.create_branch(name, parent)
     }
 
-    pub fn list_branches(&self, mountpoint: &Path) -> Result<Vec<(String, Option<String>)>> {
-        let mounts = self.mounts.lock();
-        let mount_info = mounts
-            .get(mountpoint)
-            .ok_or_else(|| crate::error::BranchError::MountNotFound(format!("{:?}", mountpoint)))?;
-        Ok(mount_info.manager.list_branches())
+    pub fn list_branches(&self) -> Vec<(String, Option<String>)> {
+        self.manager.list_branches()
     }
 
-    pub fn get_manager(&self, mountpoint: &Path) -> Option<Arc<BranchManager>> {
-        self.mounts
-            .lock()
-            .get(mountpoint)
-            .map(|info| info.manager.clone())
+    pub fn get_manager(&self) -> Arc<BranchManager> {
+        self.manager.clone()
     }
 
     pub fn run(&self) -> Result<()> {
@@ -361,29 +300,22 @@ impl Daemon {
                     Err(e) => Response::error(&format!("{}", e)),
                 }
             }
-            Request::Create {
-                name,
-                parent,
-                mountpoint,
-            } => {
-                let path = PathBuf::from(&mountpoint);
-                match self.create_branch(&name, &parent, &path) {
-                    Ok(()) => Response::success(),
-                    Err(e) => Response::error(&format!("{}", e)),
-                }
-            }
+            Request::Create { name, parent } => match self.create_branch(&name, &parent) {
+                Ok(()) => Response::success(),
+                Err(e) => Response::error(&format!("{}", e)),
+            },
             Request::NotifySwitch { mountpoint, branch } => {
                 let path = PathBuf::from(&mountpoint);
                 let mut mounts = self.mounts.lock();
                 if let Some(ref mut info) = mounts.get_mut(&path) {
                     // Unregister old notifier
-                    info.manager
+                    self.manager
                         .unregister_notifier(&info.current_branch, &path);
                     // Update tracked branch
                     let old_branch = std::mem::replace(&mut info.current_branch, branch.clone());
                     // Register notifier for new branch
                     let notifier = Arc::new(info.session.notifier());
-                    info.manager
+                    self.manager
                         .register_notifier(&branch, path.clone(), notifier);
                     log::info!(
                         "Mount {:?} switched from '{}' to '{}'",
@@ -396,23 +328,18 @@ impl Daemon {
                     Response::error(&format!("Mount not found: {:?}", path))
                 }
             }
-            Request::List { mountpoint } => {
-                let path = PathBuf::from(&mountpoint);
-                match self.list_branches(&path) {
-                    Ok(branches) => {
-                        let branches: Vec<_> = branches
-                            .into_iter()
-                            .map(|(name, parent)| {
-                                serde_json::json!({
-                                    "name": name,
-                                    "parent": parent
-                                })
-                            })
-                            .collect();
-                        Response::success_with_data(serde_json::json!(branches))
-                    }
-                    Err(e) => Response::error(&format!("{}", e)),
-                }
+            Request::List => {
+                let branches: Vec<_> = self
+                    .list_branches()
+                    .into_iter()
+                    .map(|(name, parent)| {
+                        serde_json::json!({
+                            "name": name,
+                            "parent": parent
+                        })
+                    })
+                    .collect();
+                Response::success_with_data(serde_json::json!(branches))
             }
             Request::Shutdown => {
                 log::info!("Shutdown requested, cleaning up all mounts");
