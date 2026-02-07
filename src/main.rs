@@ -36,7 +36,7 @@ enum Commands {
         /// Branch name
         name: String,
 
-        /// Mount point where the branch should be created
+        /// Mount point to switch to the new branch
         mountpoint: PathBuf,
 
         /// Parent branch name
@@ -68,11 +68,8 @@ enum Commands {
         storage: PathBuf,
     },
 
-    /// List branches for a mountpoint
+    /// List branches
     List {
-        /// Mount point to list branches for
-        mountpoint: PathBuf,
-
         /// Storage directory
         #[arg(long, default_value = "/var/lib/branchfs")]
         storage: PathBuf,
@@ -154,7 +151,6 @@ fn main() -> Result<()> {
                 &Request::Create {
                     name: name.clone(),
                     parent: parent.clone(),
-                    mountpoint: mountpoint.to_string_lossy().to_string(),
                 },
             )?;
 
@@ -251,19 +247,10 @@ fn main() -> Result<()> {
             println!("Aborted branch at {:?}", mountpoint);
         }
 
-        Commands::List {
-            mountpoint,
-            storage,
-        } => {
+        Commands::List { storage } => {
             let storage = storage.canonicalize()?;
-            let mountpoint = mountpoint.canonicalize()?;
 
-            let response = send_request(
-                &storage,
-                &Request::List {
-                    mountpoint: mountpoint.to_string_lossy().to_string(),
-                },
-            )?;
+            let response = send_request(&storage, &Request::List)?;
 
             if response.ok {
                 println!("{:<20} {:<20}", "BRANCH", "PARENT");

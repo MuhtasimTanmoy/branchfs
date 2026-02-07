@@ -82,8 +82,8 @@ branchfs create experiment /mnt/workspace
 cd /mnt/workspace
 echo "new code" > feature.py
 
-# List branches for this mount
-branchfs list /mnt/workspace
+# List branches
+branchfs list
 
 # Commit changes to base (switches back to main, stays mounted)
 branchfs commit /mnt/workspace
@@ -145,35 +145,34 @@ cat /mnt/workspace/@feature-a/@child/file.txt
 
 This is useful for multi-agent workflows where each agent can bind-mount a different `@branch` path to work on isolated branches in parallel within the same mount.
 
-### Parallel Speculation (Multiple Mount Points)
+### Parallel Speculation (Multiple Agents)
 
-Each mount has its own isolated branch namespace:
+With `@branch` virtual paths, multiple agents can work in parallel through a single mount:
 
 ```bash
-# Mount two isolated workspaces from the same base
-branchfs mount --base ~/project /mnt/approach-a
-branchfs mount --base ~/project /mnt/approach-b
+# Mount once
+branchfs mount --base ~/project /mnt/workspace
 
-# Create branches in each (isolated from each other)
-branchfs create experiment /mnt/approach-a
-branchfs create experiment /mnt/approach-b  # same name, different mount = OK
+# Create branches for each agent
+branchfs create agent-a /mnt/workspace
+branchfs create agent-b /mnt/workspace
 
-# Work in parallel...
-echo "approach a" > /mnt/approach-a/solution.py
-echo "approach b" > /mnt/approach-b/solution.py
+# Each agent works via its own @branch path (no switching needed)
+echo "approach a" > /mnt/workspace/@agent-a/solution.py
+echo "approach b" > /mnt/workspace/@agent-b/solution.py
 
-# Commit one approach
-branchfs commit /mnt/approach-a
+# Commit one agent's work
+echo "commit" > /mnt/workspace/@agent-a/.branchfs_ctl
 
-# approach-b is unaffected (isolated mount)
-cat /mnt/approach-b/solution.py  # still works
+# agent-b is unaffected
+cat /mnt/workspace/@agent-b/solution.py  # still works
 ```
 
 ## Semantics
 
-### Per-Mount Isolation
+### Shared Branch Namespace
 
-Each mount point has its own isolated branch namespace. Branches created in one mount are not visible to other mounts, even if they share the same base directory. This includes `@branch` virtual paths — `/@feature-a` on one mount has no relation to `/@feature-a` on another mount, even if they share the same base. This enables true parallel speculation without interference.
+All mounts share a single branch namespace managed by the daemon. Branches created through any mount are visible from all mounts via `@branch` virtual paths. This simplifies multi-agent workflows — each agent accesses its branch via `/@branch-name/` without needing separate mount points.
 
 ### Commit
 
@@ -181,7 +180,7 @@ Committing a branch applies the entire chain of changes to the base filesystem:
 
 1. Changes are collected from the current branch up through its ancestors
 2. Deletions are applied first, then file modifications
-3. Mount's epoch increments, invalidating all branches in this mount
+3. Epoch increments, invalidating all branches across all mounts
 4. **Mount automatically switches to main branch** (stays mounted)
 5. Memory-mapped regions trigger `SIGBUS` on next access
 
@@ -190,15 +189,13 @@ Committing a branch applies the entire chain of changes to the base filesystem:
 Aborting discards the entire branch chain without affecting the base:
 
 1. The entire branch chain (current branch up to main) is discarded
-2. Sibling branches in the same mount continue operating normally
+2. Other branches continue operating normally
 3. **Mount automatically switches to main branch** (stays mounted)
 4. Memory-mapped regions in aborted branches trigger `SIGBUS`
 
 ### Unmount
 
-Unmounting removes the mount and cleans up all its branches:
+Unmounting removes the FUSE mount:
 
-1. **All branches for this mount are discarded** (full cleanup)
-2. Mount-specific storage is deleted
-3. The daemon automatically exits when the last mount is removed
-4. Other mounts are unaffected (per-mount isolation)
+1. The FUSE session is torn down
+2. The daemon automatically exits when the last mount is removed
